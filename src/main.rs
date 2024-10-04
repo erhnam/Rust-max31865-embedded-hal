@@ -14,18 +14,37 @@ const MAX31865_REG_LSB: u8 = 0x02;
 const MAX31865_CALIBRATION_DEFAULT: u32 = 43234;
 
 fn gpio_get_pin(pin_num: u64) -> u64 {
-    let pinnum = [
-        1, 2, 4, 5, 6, 7, 9, 10, 11, 12, 14, 15, 16, 17, 19, 20, 21, 22, 24, 25, 26, 27, 29, 41,
-    ];
-    let pinmap = [
-        508, 509, 378, 377, 371, 372, 375, 374, 373, 370, 425, 426, 496, 497, 494, 495, 503, 504,
-        502, 505, 507, 506, 356, 440,
-    ];
+    let pin_map: HashMap<u64, u64> = [
+        (1, 508),
+        (2, 509),
+        (4, 378),
+        (5, 377),
+        (6, 371),
+        (7, 372),
+        (9, 375),
+        (10, 374),
+        (11, 373),
+        (12, 370),
+        (14, 425),
+        (15, 426),
+        (16, 496),
+        (17, 497),
+        (19, 494),
+        (20, 495),
+        (21, 503),
+        (22, 504),
+        (24, 502),
+        (25, 505),
+        (26, 507),
+        (27, 506),
+        (29, 356),
+        (41, 440),
+    ]
+    .iter()
+    .cloned()
+    .collect();
 
-    match pinnum.iter().position(|&x| x == pin_num) {
-        Some(index) => pinmap[index],
-        None => 0, // Valor predeterminado si el pin no se encuentra en la lista
-    }
+    *pin_map.get(&pin_num).unwrap_or(&0)
 }
 
 /// perform half duplex operations using Read and Write traits
