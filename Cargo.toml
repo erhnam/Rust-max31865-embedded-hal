@@ -9,7 +9,7 @@ edition = "2021"
 anyhow = "1.0.79"
 embedded-hal = "1.0.0"
 embedded-hal-async = "1.0.0"
-linux-embedded-hal = "0.4.0"
+linux-embedded-hal = "0.3.0"
 max31865 = "0.1.1"
 tokio = { version = "1.36.0", features = ["rt", "macros"] }
 tracing = { version = "0.1.40", features = ["async-await"] }

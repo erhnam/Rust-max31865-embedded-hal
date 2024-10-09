@@ -1,16 +1,14 @@
-use std::io::{Read,Write};
-
 use std::{thread, time::Duration};
-use linux_embedded_hal::spidev::{Spidev, SpidevOptions, SpidevTransfer, SpiModeFlags};
-use linux_embedded_hal::sysfs_gpio::{Direction, Pin};
-use max31865::{FilterMode, SensorType};
-use max31865::temp_conversion::LOOKUP_VEC_PT100;
+use std::collections::HashMap;
 
-const PIN_SPI_CS: u64 = 12;
-const MAX31865_REG_READ_CONF: u8 = 0x00;
-const MAX31865_REG_WRITE_CONF: u8 = 0x80;
-const MAX31865_REG_MSB: u8 = 0x01;
-const MAX31865_REG_LSB: u8 = 0x02;
+use linux_embedded_hal::spidev::{SpidevOptions, SpiModeFlags};
+use linux_embedded_hal::sysfs_gpio::Direction;
+use linux_embedded_hal::{Pin, Spidev};
+use max31865::{FilterMode, Max31865, SensorType};
+
+const MAX31865_RDY_PIN: u64 = 7;
+const MAX31865_CS_PIN: u64 = 12;
+const MAX31865_HZ: u32 = 5_000_000;
 const MAX31865_CALIBRATION_DEFAULT: u32 = 43234;
 
 fn gpio_get_pin(pin_num: u64) -> u64 {
@@ -47,33 +45,6 @@ fn gpio_get_pin(pin_num: u64) -> u64 {
     *pin_map.get(&pin_num).unwrap_or(&0)
 }
 
-/// perform half duplex operations using Read and Write traits
-fn read_write(spi: &mut Spidev, address: u8, value: u8) -> u8 {
-    let mut rx_buf = [0_u8; 2];
-    if value != 0 {
-        spi.write(&[address, value]).unwrap();
-    } else {
-        spi.write(&[address, 0x00]).unwrap();
-    }
-
-    spi.read(&mut rx_buf).unwrap();
-
-    rx_buf[1]
-}
-
-/// Perform full duplex operations using Ioctl
-fn transfer(spi: &mut Spidev, address: u8) -> u8 {
-    // "write" transfers are also reads at the same time with
-    // the read having the same length as the write
-    let tx_buf = [address, 0x00];
-    let mut rx_buf = [0; 2];
-    
-    let mut transfer = SpidevTransfer::read_write(&tx_buf, &mut rx_buf);
-    spi.transfer(&mut transfer).unwrap();
-
-    rx_buf[1]
-}
-
 #[tracing::instrument]
 fn main() -> anyhow::Result<()> {
     let subscriber = tracing_subscriber::FmtSubscriber::new();
@@ -85,64 +56,49 @@ fn main() -> anyhow::Result<()> {
     let mut spi1 = Spidev::open("/dev/spidev0.0").expect("error initializing SPI");
     let options = SpidevOptions::new()
         .bits_per_word(8)
-        .max_speed_hz(5_000_000)
+        .max_speed_hz(MAX31865_HZ)
         .mode(SpiModeFlags::SPI_MODE_3)
         .build();
 
     spi1.configure(&options).expect("error configuring SPI");
 
-    spi1.flush().unwrap();
-
     thread::sleep(Duration::from_millis(100));
 
-    let spi1_cs = Pin::new(gpio_get_pin(PIN_SPI_CS));
-    spi1_cs.export().expect("error exporting cs pin");
-    spi1_cs.set_direction(Direction::Out)
-        .expect("error setting cs pin direction");
-    spi1_cs.set_value(0).unwrap();
-
-    /* 
-    let conf: u8 = ((vbias as u8) << 7)
-            | ((conversion_mode as u8) << 6)
-            | ((one_shot as u8) << 5)
-            | ((sensor_type as u8) << 4)
-            | (filter_mode as u8);
-*/
-    let conf: u8 = ((true as u8) << 7)
-            | ((true as u8) << 6)
-            | ((false as u8) << 5)
-            | ((SensorType::TwoOrFourWire as u8) << 4)
-            | (FilterMode::Filter50Hz as u8);  
-   
-    /* Enviar Configuracion */
-    spi1_cs.set_value(0).unwrap();
-    read_write(&mut spi1, MAX31865_REG_WRITE_CONF, conf);
+    let spi1_cs = Pin::new(gpio_get_pin(MAX31865_CS_PIN));
+    spi1_cs.export().unwrap();
+    while !spi1_cs.is_exported() {}
+    spi1_cs.set_direction(Direction::Out).unwrap();
     spi1_cs.set_value(1).unwrap();
 
-    spi1_cs.set_value(0).unwrap();
-    let config: u8 = read_write(&mut spi1, MAX31865_REG_WRITE_CONF, conf);
-    spi1_cs.set_value(1).unwrap();
+    let max31865_rdy = Pin::new(gpio_get_pin(MAX31865_RDY_PIN));
+    max31865_rdy.export().unwrap();
+    while !max31865_rdy.is_exported() {}
+    max31865_rdy.set_direction(Direction::In).unwrap();
 
-    tracing::info!("MAX31865 - configurado: 0x{:02X}", config);
+    let mut max31865 = Max31865::new(spi1, spi1_cs, max31865_rdy).unwrap();
 
-    tracing::info!("MAX31865 - leyendo temperatura");
+    // Setup the sensor so it repeatedly performs conversion and informs us over
+    // the ready pin.
+    max31865
+        .configure(
+            true,
+            true,
+            false,
+            SensorType::ThreeWire,
+            FilterMode::Filter50Hz,
+        )
+        .unwrap();
 
-    // leer el registro MSB
-    spi1_cs.set_value(0).unwrap();
-    let msb: u8 = transfer(&mut spi1, MAX31865_REG_MSB);
-    spi1_cs.set_value(1).unwrap();
+        max31865.set_calibration(MAX31865_CALIBRATION_DEFAULT);
 
-    // leer el registro LSB
-    spi1_cs.set_value(0).unwrap();
-    let lsb: u8 = transfer(&mut spi1, MAX31865_REG_LSB);
-    spi1_cs.set_value(1).unwrap();
+    loop {
+        // If the sensor is ready, read the value and print it otherwise do
+        // nothing one may not want to loop like this.
+        if max31865.is_ready().unwrap() {
+            let temp = max31865.read_default_conversion().unwrap();
 
-    // Combinar MSB y LSB
-    let raw_value = (msb as u16) << 8 | (lsb as u16);
-    let ohms = ((raw_value >> 1) as u32 * MAX31865_CALIBRATION_DEFAULT) >> 15;
-    let temp = LOOKUP_VEC_PT100.lookup_temperature(ohms as i32);
-    
-    tracing::info!("MAX31865 - Temperatura: {:?}", temp as f32 / 100.0);
-
-    return Ok(());
+            tracing::info!("MAX31865 - Temperatura: {:?}", temp as f32 / 100.0);
+        }
+        thread::sleep(Duration::from_millis(2000));
+    }
 }
